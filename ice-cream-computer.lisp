@@ -4,32 +4,23 @@
 ;;;; License granted according to Attribution-Noncommercial-Sharealike Creative Commons 
 ;;;; Thanks to wvxvw at lispforum.com, Adam Tornhill, & Peter Seibel for guidance.
 ;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; This library is free software; you can redistribute it and/or
-;;; modify it under the terms of the Lisp Lesser General Public
-;;; License: the GNU Lesser General Public License as published by the
-;;; Free Software Foundation (either version 2.1 of the License, 
-;;; or, at your option, any later version),
-;;; and the Franz, Inc Lisp-specific preamble.
-;;;
-;;; This library is distributed in the hope that it will be useful,
-;;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-;;; Lesser General Public License for more details.
-;;;
-;;; You should have received a copy of the Lisp Lesser General Public
-;;; License along with this library; if not, write to the Free Software
-;;; Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-;;; and see Franz, Inc.'s preamble to the GNU Lesser General Public License,
-;;; http://opensource.franz.com/preamble.html.
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;; To Use:
 ;;;; 1. Execute all
 ;;;; 2. Call (start-server 80)
 ;;;;
-;;;; Revision 25
+;;;; Revision 27
 ;;;;
 ;;;; Revision History
+;;;; 27.	2015.07.10
+;;;; Compute-score was crashing whenever it got unknown terms. Squashed.
+;;;;
+;;;; 26.	2015.07.10
+;;;; Updated the front-end portion to classify ice creams.
+;;;;
+;;;; 25.	2015.07.10
+;;;; Added a few functions from Practical Common Lisp's spam filter chapter
+;;;; to finally complete the naive Bayes ice cream classifier!
+;;;;
 ;;;; 24.	2015.02.11
 ;;;; 1. train-ing now also calls update-score so that the ingredient's score will be updated
 ;;;; from the train page or from the rankings page
@@ -60,14 +51,19 @@
 ;;;; None known
 ;;;;
 ;;;; To Do
+;;;;
+;;;; N. Parsing
+;;;;  1. Throwout non-content words like conjunctions.
+;;;;  2. Parse multi-word items like "motor oil" as one item.
+;;;;
 ;;;; N. Rather than reloading the entire page on submit, rework the AJAX  
 ;;;; to update a div, a la ice cream computer 1. 
 ;;;;
 ;;;; N. Leaderboard
-;;;; 1. user-selectable ranking by available criteria
+;;;;  1. user-selectable ranking by available criteria
 ;;;; I think I'll want AJAX for that.
 ;;;; 
-;;;; 2. thumbs-up/down from the rankings page
+;;;;  2. thumbs-up/down from the rankings page
 ;;;; How could that work? A script at the top with variables for icecream and 
 ;;;; flavor, and buttons on each row that fill in the values of those variables
 ;;;; and calls the function, which posts the data?
@@ -76,18 +72,9 @@
 ;;;; Randomly generate an ice cream from ingredients in the database.
 ;;;; Let users enter those into the rankings.
 ;;;;
-;;;; N. Use CL-PPRE, or whatever Weitz's text parsing package is called,
-;;;; to parse input text into tokenized ingredient-feature objects so that
-;;;; multi-ingredient ice creams may be scored and similary strings that
-;;;; really mean the same token may be parsed into the same token.
-;;;;
-;;;; N. Crawl the web, scraping ice cream instances.
-;;;;
-;;;; N. Read up on some graph theory & application because I suspect 
-;;;; I'm turning this into a bit of a graph theory problem.
 
 
-(ql:quickload '(cl-mongo cl-who hunchentoot parenscript))
+(ql:quickload '(cl-mongo cl-who hunchentoot parenscript cl-ppcre))
 
 
 
@@ -116,7 +103,6 @@
                    :unique t))
 
 (unique-index-on "INGREDIENT")
-
 
 (defclass totals ()
   ((deliciouses
@@ -279,15 +265,16 @@
 
 (defun add-ing (ing)
   "Add an ingredient-feature with the given symbol as the ingredient slot value.
-   In this version we don't check for duplicates."
+   In this version we don't check for duplicates.
+  Returns result of the mongo insert operation."
   (db.insert *ice-cream-collection* (ing->doc (make-instance 'ingredient-feature :ingredient ing))))
 
 
 (defun sym->ing-feat (name)
-  "Queries the database for a game matching the
-   given name.
+  "Takes a symbol, returns an ingredient-feature object.
+  Queries the database for an ingredient matching the given name.
    Note that db.find behaves like Mongo's findOne by default, so
-   when we found-games we know there can be only one."
+   when we've found one we know there can be only one."
   (let ((found-ingredients (docs (db.find *ice-cream-collection* ($ "INGREDIENT" (string-upcase (mkstr name)))))))
     (when found-ingredients
       (doc->ing (first found-ingredients)))))
@@ -359,10 +346,15 @@
    (* 2 n-probs)))
 
 (defun compute-score (features)
-  "Computes the probability that an ice cream with the ingredients is disgusting."
+  "Computes the probability that an ice cream with the ingredients is disgusting. Assigns score of
+.5 to individual features it has not trained on."
   (let ((del-probs ()) (dis-probs ()) (n-probs 0))
     (dolist (feature features)
-      (unless (untrained-p feature)
+      (if (not (sym->ing-feat feature))
+          (progn
+            (push .5 del-probs)
+            (push .5 dis-probs)
+            (incf n-probs))
         (let ((del-prob (float (bayesian-delicious-probability feature) 0.0d0)))
           (push del-prob del-probs)
           (push (- 1.0d0 del-prob) dis-probs)
@@ -373,6 +365,39 @@
 
 
 
+
+(defun classify (ic)
+  "Chains together feature extraction, score computation, and classification."
+  (classification (compute-score (extract-features ic))))
+
+(defun classification (score)
+  "Takes a score and returns a classification atom."
+  (cond
+   ((>= score .6) 'delicious)
+   ((<= score .4) 'disgusting)
+   (t 'indeterminate)))
+
+(defun extract-ings (text)
+    "Takes a string, returns a list of unique words (strings) found in the string."
+  (delete-duplicates
+   (cl-ppcre:all-matches-as-strings "[a-zA-Z]{3,}" text)
+   :test #'string=))
+
+
+(defun extract-features (text)
+  "Takes a string. Calls extract-ings to parse into unique strings. Returns a list of those unique strings
+as symbols."
+  (mapcar #'(lambda (ing)
+              (intern (string-upcase ing))) 
+          (extract-ings text)))
+
+(defun train-ic (text type)
+  "Takes a string and a classification for the entire string (either symbol 'delicious or 'disgusting).
+Calls extract-features on the string and increments the appropriate count for each extracted
+feature accordingly."
+  (dolist (feature (extract-features text))
+;; increment-count expects an ingredient-feature object and a classification symbol
+    (train-ing feature type)))
 
 
 
@@ -460,7 +485,6 @@
               (setf (chain window onload) init)))
     (:h1 "Compute some ice cream!")
     (:form :action "/compute-ice-cream" :method "post" :id "computeform"
-           (:p "Input one ingredient.")
            (:input :type "text" :name "icecream" :class "txt")
            (:input :type "submit" :value "Compute" :class "btn"))
     (:p (:a :href "rankings" "Rankings"))
@@ -472,58 +496,14 @@
 ;; than one argument when it's dispatched.
 (define-easy-handler (compute-ice-cream :uri "/compute-ice-cream") (icecream)
   (let (msg)
-    (cond
-     ((not (sym->ing-feat (intern (string-upcase icecream))))
-      (progn
-        (setf msg (format nil "I have not tasted ~a ice cream." icecream))
-        (standard-page 
-            (:title "Ice Cream Not Found"
-                    :script (ps  ; client side validation
-                              (defvar trainform nil)
-                              (defun validateflavor (evt)
-                                "For a more robust event handling
-                                mechanism you may want to consider
-                                a library (e.g. jQuery) that encapsulates
-                                all browser-specific quirks."
-                                (when (= (@ trainform flavor value) "...")
-                                  (chain evt (prevent-default))
-                                  (alert "Please select a flavor.")))
-                              (defun init ()
-                                (setf trainform (chain document
-                                                       (get-element-by-id "trainform")))
-                                (chain trainform
-                                       (add-event-listener "submit" validateflavor false)))
-                              (setf (chain window onload) init)))
-          (:h1 "Ice Cream Not Found")
-          (:p (fmt msg))
-          (:form :action "/train" :method "post" :id "trainform"
-                 (:input :type "text" :name "icecream" :class "txt" :value icecream)
-                 "&nbsp;ice cream is&nbsp;"
-                 (:select :name "flavor"
-                          (:option :value "..." "...")
-                          (:option :value "delicious" "delicious")
-                          (:option :value "disgusting" "disgusting"))
-                 ".&nbsp;"
-                 (:input :type "submit" :value "Learn" :class "btn")
-                 "&nbsp;this flavor."))))
-
-     ((or (null icecream) (zerop (length icecream))) ; in case js is disabled
-      (progn 
-        (setf msg (format nil "You did not submit a potential ingredient for ice cream computing. 
-Try to type into the text input field."))
-        (standard-page
-            (:title "Computed Ice Cream Score")
-          (:h1 "Computed Ice Cream Score")
-          (:p (fmt msg)))))
-
-     (t (progn
-          (setf msg (format 
+    (progn
+      (setf msg (format 
                      nil 
-                     "I think ~a ice cream has a ~,2F% chance of being delicious." 
+                     "~a ice cream is ~a." 
                      icecream 
-                     (* 100 (update-score (sym->ing-feat icecream))))) ;(score (list icecream))))))
+                     (classify icecream))) ;(score (list icecream))))))
           (standard-page
-              (:title "Computed Ice Cream Score"
+              (:title "Ice Cream Classification"
                       :script (ps  ; client side validation
                               (defvar trainform nil)
                               (defun validateflavor (evt)
@@ -540,7 +520,7 @@ Try to type into the text input field."))
                                 (chain trainform
                                        (add-event-listener "submit" validateflavor false)))
                               (setf (chain window onload) init)))
-            (:h1 "Computed Ice Cream Score")
+            (:h1 "Ice Cream Classification")
             (:p (fmt msg))
             (:form :action "/train" :method "post" :id "trainform"
                  (:p "But what do you think?")
@@ -556,8 +536,8 @@ Try to type into the text input field."))
                   ".&nbsp;")
                  (:p
                   (:input :type "submit" :value "Learn" :class "btn")
-                  "&nbsp;this flavor some more."))))))))
-  
+                  "&nbsp;this flavor some more."))))))
+
 
 (define-easy-handler (colophon :uri "/colophon") ()
   (standard-page 
@@ -577,13 +557,18 @@ Washington, D.C. Metro's Blue Line. Thank you, mysterious Blue Line Rider!")))
 
 
 (define-easy-handler (train :uri "/train") (icecream flavor)
-  (train-ing (intern (string-upcase icecream)) (intern (string-upcase flavor) :icc))
+;; train the classifier
+  (train-ic icecream (intern (string-upcase flavor) :icc))
+;; update scores
+  (dolist (feat-sym (extract-features icecream))
+    (update-score (sym->ing-feat feat-sym)))
+;; display the page
   (let (msg0 msg1)
     (setf msg0 (format 
                 nil 
                 "Well in that case, I think ~a ice cream should have a ~,2F% chance of being delicious." 
                 icecream 
-                (* 100 (update-score (sym->ing-feat icecream))))
+                (* 100 (compute-score (extract-features icecream))))
           msg1 (format nil "Of course, this is only an estimate. Therefore, The Interest of Science mandates 
 you provide me more ~a samples of ~a ice cream to refine my estimate." flavor icecream))
     (standard-page
@@ -623,7 +608,7 @@ you provide me more ~a samples of ~a ice cream to refine my estimate." flavor ic
                (:td (ps 
                       (chain xmlhttp (open "post" "train"))
                       (chain xmlhttp (send "icecream=" (ingredient ingrdnt) "flavor=delicious"))
-)))))))
+)))))))))
 
 
 ;; Alright, everything has been defined - launch Hunchentoot and have it
