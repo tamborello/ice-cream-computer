@@ -1,16 +1,37 @@
-;;;; Ice Cream Computer
 ;;;; A brief software exploration inspired by a game of crazy or bluetooth
-;;;; (C) 2012-5 Frank Tamborello
+;;;;
+;;;; (C) 2012-7 Frank Tamborello
+;;;;
 ;;;; License granted according to Attribution-Noncommercial-Sharealike Creative Commons 
-;;;; Thanks to wvxvw at lispforum.com, Adam Tornhill, & Peter Seibel for guidance.
+;;;;
+;;;; Thanks to The Mysterious WMATA Blue Line Rider, wvxvw at lispforum.com, Adam Tornhill, Peter Seibel, and Paul Graham for inspiration & guidance.
+;;;;
+;;;; λ
 ;;;;
 ;;;; To Use:
 ;;;; 1. Execute all
-;;;; 2. Call (start-server 80)
+;;;; 2. Call (icc:start-server) to start accepting HTTP requests
+;;;; 3. Call (icc:stop-server) to stop accepting HTTP requests
 ;;;;
-;;;; Revision 27
+;;;; Revision 30
 ;;;;
 ;;;; Revision History
+;;;;
+;;;; 30 2017.04.05
+;;;; 1. Mystery can be fun in an art project, but the Ice Cream Computer has also become for me a portfolio piece of data analytic software engineering. Therefore it's time to actually explain a few things to users:
+;;;;  a. On the compute page to enter a space-delimited list of ingredients to estimate the deliciousness probability of a single ice cream composed of those ingredients.
+;;;;  b. On the rankings page that the per-ingredient values are: number of times the ingredient's appeared in a delicious ice cream, number of times the ingredient's appeared in a disgusting ice cream, probability that any ice cream containing this ingredient will be delicious. Note that some ingredients will more strongly indicate delicious or disgusting classification than others. 
+;;;; 2. Having "nil NIL NIL NIL" appear in the rankings is nonsensical, even by the standards of The Ice Cream Computer. Remove that.
+;;;;
+;;;; 29. 2016.06.26
+;;;; 1. See if I can roll back to revision 27.
+;;;; 
+;;;; 28. 2016.06.26
+;;;; 1. Rolled back to revision 5, the random text generator, after parenscript had apparently broken.
+;;;; 2. TIL that I don't have to run ICC as root if I use port 8080 instead of port 80, and of course NAT can forward port 80 requests to port 8080.
+;;;; 3. AJAXified the colophon, which looks way better.
+;;;;
+;;;;
 ;;;; 27.	2015.07.10
 ;;;; Compute-score was crashing whenever it got unknown terms. Squashed.
 ;;;;
@@ -50,13 +71,15 @@
 ;;;; Bugs
 ;;;; None known
 ;;;;
+;;;;
 ;;;; To Do
 ;;;;
 ;;;; N. Parsing
-;;;;  1. Throwout non-content words like conjunctions.
-;;;;  2. Parse multi-word items like "motor oil" as one item.
+;;;;  1. Parse comma-separated lists into co-occurrence stimuli, parsing multi-word items like "motor oil" as one item each. Currently the ICC parses space-delimited lists, so it can't understand that "motor oil" is one ingredient and not two.
+;;;;  2. Throwout non-content words like conjunctions.
 ;;;;
-;;;; N. Rather than reloading the entire page on submit, rework the AJAX  
+;;;; N. Single-Page Web App 
+;;;; Rather than reloading the entire page or another page on submit, rework the AJAX  
 ;;;; to update a div, a la ice cream computer 1. 
 ;;;;
 ;;;; N. Leaderboard
@@ -68,8 +91,10 @@
 ;;;; flavor, and buttons on each row that fill in the values of those variables
 ;;;; and calls the function, which posts the data?
 ;;;;
+;;;;  3. Separate rankings for ice creams rather than only for ingredients
+;;;;
 ;;;; N. Integrate some of the Ice Cream Computer 1's functionality:
-;;;; Randomly generate an ice cream from ingredients in the database.
+;;;; Randomly generate an ice cream from ingredients in the database and score it.
 ;;;; Let users enter those into the rankings.
 ;;;;
 
@@ -78,21 +103,18 @@
 
 
 
-#| production
-(load "/Lisp/quicklisp/quicklisp.lisp")
-(load "/Lisp/quicklisp/setup.lisp") |#
-;; Sandbox already has quicklisp loaded! How nice!
-;; Don't the production servers have it, too?
 
 (defpackage :icc
-  (:use :common-lisp :hunchentoot :cl-mongo :cl-who :parenscript))
+  (:use :common-lisp :hunchentoot :cl-mongo :cl-who :parenscript)
+  (:export :start-server :stop-server))
 (in-package :icc)
 
 (require :misc-lib.lisp)
 
 ;;;; Storage ;;;;
 ;; Connect to the database, ic-store ("ice cream storage")
-(db.use "ic-store" :mongo (mongo :host "192.168.2.9"))
+;; host changed when we moved, used to be 192.168.2.9
+(db.use "ic-store" :mongo (mongo :host "loki"))
 
 (defparameter *ice-cream-collection* "icecreams")
 
@@ -346,8 +368,7 @@
    (* 2 n-probs)))
 
 (defun compute-score (features)
-  "Computes the probability that an ice cream with the ingredients is disgusting. Assigns score of
-.5 to individual features it has not trained on."
+  "Computes the probability that an ice cream with the ingredients is disgusting. Assigns score of .5 to individual features it has not trained on."
   (let ((del-probs ()) (dis-probs ()) (n-probs 0))
     (dolist (feature features)
       (if (not (sym->ing-feat feature))
@@ -385,8 +406,7 @@
 
 
 (defun extract-features (text)
-  "Takes a string. Calls extract-ings to parse into unique strings. Returns a list of those unique strings
-as symbols."
+  "Takes a string. Calls extract-ings to parse into unique strings. Returns a list of those unique strings as symbols."
   (mapcar #'(lambda (ing)
               (intern (string-upcase ing))) 
           (extract-ings text)))
@@ -403,8 +423,13 @@ feature accordingly."
 
 
 ;;; Web Server
-(defun start-server (port)
-  (start (make-instance 'easy-acceptor :port port)))
+(let ((the-server (make-instance 'easy-acceptor :port 8000 :document-root #P"/Lisp/ice-cream-computer/public-html/")))
+  (defun start-server ()
+    (start the-server))
+  (defun stop-server ()
+    (stop the-server)))
+
+
 
 (defun publish-static-content ()
   (push (create-static-file-dispatcher-and-handler
@@ -439,8 +464,8 @@ feature accordingly."
                     :rel "stylesheet"
                     :href "/icc.css")
              ,(when script
-                `(:script :type "text/javascript"
-                          (str ,script))))
+		    `(:script :type "text/javascript"
+			      (str ,script))))
             (:body 
              (:div :id "header" ; Retro games header
                    (:a :href "/" (:img :src "/icc-logo.png" 
@@ -484,6 +509,7 @@ feature accordingly."
                        (add-event-listener "submit" validateicecream false)))
               (setf (chain window onload) init)))
     (:h1 "Compute some ice cream!")
+    (:p "Enter a space-delimited list of ingredients to estimate the probability that a given ice cream composed of those ingredients will be delicious.")
     (:form :action "/compute-ice-cream" :method "post" :id "computeform"
            (:input :type "text" :name "icecream" :class "txt")
            (:input :type "submit" :value "Compute" :class "btn"))
@@ -545,13 +571,8 @@ feature accordingly."
    (:h1 "Colophon")
    (:p "Silly it may be, but this site served as a useful exercise for me to learn how to
 generate HTML and Javascript dynamically, implement a learning algorithm, and interface
-with a database to achieve more and persistent storage than memory-alone would allow. This
-site runs with the cl-mongo, cl-who, hunchentoot, and parenscript packages for Common Lisp
-(Clozure Common Lisp) and Mongo DB, both on Raspian Linux, on two Raspberry Pi Model Bs.
-I used " (:a :href "http://leanpub.com/lispweb" "Lisp for the Web") " and "
-(:a :href "http://www.gigamonkeys.com/book/" "Practical Common Lisp") " as guides.")
-
-(:p "Ice Cream Computer's design theme was inspired by a phrase overheard on the
+with a database to achieve more and persistent storage than memory-alone would allow. This site runs with the cl-mongo, cl-who, hunchentoot, and parenscript packages for Common Lisp (Clozure Common Lisp) and Mongo DB, both on Raspian Linux, on two Raspberry Pi Model Bs. I used " (:a :href "http://leanpub.com/lispweb" "Lisp for the Web") " and " (:a :href "http://www.gigamonkeys.com/book/" "Practical Common Lisp") " as guides.")
+   (:p "Ice Cream Computer's design theme was inspired by a phrase overheard on the
 Washington, D.C. Metro's Blue Line. Thank you, mysterious Blue Line Rider!")))
 
 
@@ -570,7 +591,7 @@ Washington, D.C. Metro's Blue Line. Thank you, mysterious Blue Line Rider!")))
                 icecream 
                 (* 100 (compute-score (extract-features icecream))))
           msg1 (format nil "Of course, this is only an estimate. Therefore, The Interest of Science mandates 
-you provide me more ~a samples of ~a ice cream to refine my estimate." flavor icecream))
+you provide me more ~a samples of this ~a ice cream to refine my estimate." flavor icecream))
     (standard-page
         (:title "Recently Trained Ice Cream Score")
       (:h1 "Recently Trained Ice Cream Score")
@@ -591,32 +612,43 @@ you provide me more ~a samples of ~a ice cream to refine my estimate." flavor ic
     
     (standard-page
         (:title "Ice Cream Flavor Rankings")
-      (:h1 "Rankings")
+      (:h1 "Ingredient Rankings")
+      (:p "The per-ingredient values are:")
+      (:ul 
+       (:li "Number of times the ingredient appeared in a delicious ice cream,")
+       (:li "Number of times the ingredient appeared in a disgusting ice cream,")
+       (:li "Probability that any ice cream containing this ingredient will be delicious."))
+      (:p "Note that some ingredients will more strongly indicate delicious or disgusting classification than others.")
+      (:p "&nbsp;")
       (:table
-       (:tr (:td :width 200 (:b "Ingredient")) 
-            (:td :width 50 (:b "Del'"))
-            (:td :width 50 (:b "Dis'"))
-            (:td :width 50 (:b "p(del')"))
+       (:tr (:td :width 250 (:b "Ingredient")) 
+            (:td :width 60 (:b "Delicious Count"))
+            (:td :width 60 (:b "Disgusting Count"))
+            (:td :width 60 (:b "p(delicious)"))
+#|
             (:td :width 25)
-            (:td :width 25))
+            (:td :width 25)
+|#
+	    )
        (dolist (ingrdnt all-ing)
          (htm (:tr 
-               (:td (fmt "~a" (ingredient ingrdnt)))
+               (:td (fmt "~a" (string-downcase (ingredient ingrdnt))))
                (:td (fmt "~a" (delicious-freq ingrdnt)))
                (:td (fmt "~a" (disgusting-freq ingrdnt)))
                (:td (fmt "~,3F" (score ingrdnt)))
-               (:td (ps 
-                      (chain xmlhttp (open "post" "train"))
-                      (chain xmlhttp (send "icecream=" (ingredient ingrdnt) "flavor=delicious"))
-)))))))))
+;; 2017.04.06 What was I trying to do here, enable voting up or down of ingredients from the rankings page? That's not a bad idea. Too bad I apparently stopped midway implementation.
+#|
+	       (:td (ps 
+		      (chain xmlhttp (open "post" "train"))
+		      (chain xmlhttp (send "icecream=" (ingredient ingrdnt) "flavor=delicious"))))
+	       (:td (fmt "&nbsp;"))
+|#
+	       )))))))
 
 
 ;; Alright, everything has been defined - launch Hunchentoot and have it
 ;; listen to incoming requests:
 (publish-static-content)
-
-; (start-server 8080) development
-; (start-server 80) production
 
 
 
